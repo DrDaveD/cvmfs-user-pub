@@ -119,6 +119,8 @@ done
 
 
 %changelog
+# - Fix bootstrapping of repositories on a new host or pair of hosts.
+
 * Thu Jul 11 2024 Dave Dykstra <dwd@fnal.gov> 1.17-1
 - Allow tarball publishes for tarballs bigger than 1GB.  That limit
   was a new default for LimitRequestBody that was added in apache 2.4.53;
