@@ -8,7 +8,8 @@ REPO="$1"
 QUEUEDIR="$2"
 PREFIX="$3"
 CID="$4" # may be comma-separated list when touching
-PUBLISHER="$5"
+STRIPLEVELS="$5"
+PUBLISHER="$6"
 set -e
 echo "starting transaction for publish in $REPO"
 if ! cvmfs_server transaction $REPO; then
@@ -28,7 +29,7 @@ else
     SUBPATH="/cvmfs/$REPO/$PREFIX/$CID"
     echo "extracting into $SUBPATH"
     mkdir -p "$SUBPATH"
-    if ! tar -C "$SUBPATH" -xf "$QUEUEDIR/$CID"; then
+    if ! tar -C "$SUBPATH" --strip-components="$STRIPLEVELS" -xf "$QUEUEDIR/$CID.$STRIPLEVELS"; then
         echo "extraction failed, aborting"
         cvmfs_server abort -f $REPO
         exit

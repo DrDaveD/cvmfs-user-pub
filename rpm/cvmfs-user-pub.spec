@@ -1,6 +1,6 @@
 Summary: CVMFS user publication service
 Name: cvmfs-user-pub
-Version: 1.17
+Version: 1.18
 # The release_prefix macro is used in the OBS prjconf, don't change its name
 %define release_prefix 1
 Release: %{release_prefix}%{?dist}
@@ -11,13 +11,8 @@ BuildRoot: %{_tmppath}/%{name}-%{version}-%{release}-root-%(%{__id_u} -n)
 Source0: https://github.com/cvmfs-contrib/%{name}/releases/download/%{version}/%{name}-%{version}.tar.gz
 
 Requires: httpd
-%if %{rhel} > 7
 Requires: python3-mod_wsgi
 Requires: python3-scitokens
-%else
-Requires: mod_wsgi
-Requires: python2-scitokens
-%endif
 Requires: mod_ssl
 Requires: cvmfs-server >= 2.10.1
 # require similar cvmfs version also for consistency
@@ -96,8 +91,7 @@ for service in httpd cvmfs-user-pub; do
     if ! systemctl is-active --quiet $service; then
         systemctl start $service
     elif [ $service = httpd ]; then
-        systemctl reload $service
-        /usr/libexec/%{name}/ping
+        systemctl restart $service
     fi
 done
 
@@ -119,7 +113,14 @@ done
 
 
 %changelog
-# - Fix bootstrapping of repositories on a new host or pair of hosts.
+* Tue Oct 14 2025 Dave Dykstra <dwd@fnal.gov> 1.18-1
+- Add "&source" and "&striplevels" options to the publish api and
+  "allowsource" configuration parameter to support downloading tarballs
+  from a web service instead of uploading them through the api.
+- Fix bootstrapping of repositories on a new host or pair of hosts,
+  including by restarting httpd instead of just reloading it, to make it
+  turn off PrivateTmp and do a ping.
+- Remove support for el7 and python2
 
 * Thu Jul 11 2024 Dave Dykstra <dwd@fnal.gov> 1.17-1
 - Allow tarball publishes for tarballs bigger than 1GB.  That limit
