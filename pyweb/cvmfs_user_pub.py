@@ -692,10 +692,16 @@ def dispatch(environ, start_response):
             logmsg(ip, cn, 'wrote ' + contentlength + ' bytes to ' + cidpath)
         except Exception as e:
             logmsg(ip, cn, 'error getting publish data: ' + str(e))
+            logmsg(ip, cn, 'removing downloaded tmp file')
             try:
                 os.remove(cidpath + '.tmp')
             except OSError:
                 pass
+            logmsg(ip, cn, 'removing cid from publishes in progress')
+            publock.acquire()
+            if cid in pubcids:
+                del pubcids[cid]
+            publock.release()
             return bad_request(start_response, ip, cn, 'error getting publish data')
         return good_request(start_response, queueorstamp(ip, cn, cid, conf))
 
