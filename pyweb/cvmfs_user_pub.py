@@ -8,18 +8,26 @@
 #     update :  Exactly like "exists" except that if the cid xxxxx is
 #               present, also queues a publish to update a timestamp for
 #               the cid, in any repository.
-#     publish : Queues tarball in POSTed body for publication in cid
-#               xxxxx.  If already present, returns PRESENT:path and
-#               publishes a timestamp like "update", otherwise returns OK
-#               and publishing is queued to happen as soon as possible.
-# All of the above are on https and require a user certificate.
+#     publish : Queues tarball in POSTed body for publication in cid xxxxx.
+#               If already present, returns PRESENT:path and publishes a
+#               timestamp like "update", otherwise returns OK and publishing
+#               is queued to happen as soon as possible.  If additional
+#               parameter &source=path is added then instead of the POSTed
+#               body the tarball is downloaded from the given path prepended
+#               with "https://", only if the first component is listed in an
+#               "allowsource" configuration (defaults to github.com if none
+#               are listed). If additional parameter &striplevels=N is added,
+#               then N levels of directories are removed from the beginning
+#               of paths in the downloaded tarball (0, 1, or 2, default 0).
+#
+# All of the above are on https and require a user certificate or token.
 #               
 # cid is the Code IDentifier, expected to be a secure hash of the
 # tarball but can be anything that is unique per tarball.  It may
 # optionally contain a slash to group tarballs by project (but no more
 # than one slash).
 #
-# Additional API URLs on http or https without user cert of the form
+# Additional API URLs on http or https without authentication of the form
 #  /pubapi/<request> where <request> is
 #     config :  Returns configuration, currently the label "repos:"
 #               followed by a comma-separated list of repositories
@@ -29,19 +37,13 @@
 #    LABORATORY.  All rights reserved.
 # For details of the Fermitools (BSD) license see COPYING.
 
-from __future__ import print_function
-
 import os, threading, time, datetime
 import socket, subprocess, select
 import fcntl
-try:
-    from urllib.parse import parse_qs
-    from urllib.parse import unquote
-    import queue
-except:  # python < 3
-    from urlparse import parse_qs
-    from urllib import unquote
-    import Queue as queue
+from urllib.parse import parse_qs
+from urllib.parse import unquote
+import urllib.request
+import queue
 import shutil, re
 import scitokens
 
@@ -252,7 +254,7 @@ def publishloop(repo, reponum, conf):
     while True:
         cid = None
         try:
-            cid, cn, conf, option = pubqueue.get(True, 60)
+            cid, striplevels, cn, conf, option = pubqueue.get(True, 60)
         except queue.Empty as e:
             # cid will be None in this case
             pass
@@ -279,10 +281,11 @@ def publishloop(repo, reponum, conf):
             if cid != "":
                 # enclose cid in single quotes because it comes from the user
                 cmd = "/usr/libexec/cvmfs-user-pub/publish " + repo + " " + \
-                        queuedir + " " + pubdir + " '" + cid + "' '" + cn + "'"
+                        queuedir + " " + pubdir + " '" + \
+                        cid + "' '" + striplevels + "' '" + cn + "'"
                 returncode = runthreadcmd(cmd, 'publish ' + cid)
                 if 'queued' in option:
-                    cidpath = os.path.join(queuedir,cid)
+                    cidpath = os.path.join(queuedir,cid+'.'+striplevels)
                     threadmsg('removing ' + cidpath)
                     os.remove(cidpath)
                     publock.acquire()
@@ -370,20 +373,20 @@ def stamp(ip, cn, cid, conf, msg):
         logmsg(ip, cn, cid + ' already present' + msg)
         # although the cid is in the queue, the current contents of
         # tscids will actually be used during publish, if not empty
-        pubqueue.put([cid, cn, conf, 'ts'])
+        pubqueue.put([cid, '-', cn, conf, 'ts'])
 
-def queueorstamp(ip, cn, cid, conf):
+def queueorstamp(ip, cn, cid, striplevels, conf):
     inrepo = cidinrepo(cid, conf)
     if inrepo is not None:
         stamp(ip, cn, cid, conf, ' in ' + inrepo)
-        cidpath = os.path.join(queuedir,cid)
+        cidpath = os.path.join(queuedir,cid+'.'+striplevels)
         logmsg(ip, cn, 'removing ' + cidpath)
         try:
             os.remove(cidpath)
         except OSError:
             logmsg(ip, cn, 'removing ' + cidpath + ' failed, continuing')
         return 'PRESENT:' + repocidpath(inrepo, cid) + '\n'
-    pubqueue.put([cid, cn, conf, 'queued'])
+    pubqueue.put([cid, striplevels, cn, conf, 'queued'])
     return 'OK\n'
 
 def dispatch(environ, start_response):
@@ -511,10 +514,28 @@ def dispatch(environ, start_response):
                         path = root + '/' + file
                         if file.endswith('.tmp'):
                             logmsg(ip, '-', 'cleaning out ' + path)
-                            os.remove(path)
+                            try:
+                                os.remove(path)
+                            except exception as e:
+                                logmsg(ip, '-', 'failed to remove: ' + str(e))
+                                continue
                         else:
                             cid = path[len(queuedir)+1:]
-                            msg = queueorstamp(ip, 'Requeue', cid, conf)
+                            # '.N' should always be at the end except when
+                            # upgrading from an older version that didn't
+                            # have the striplevels file extension.
+                            striplevels='0'
+                            if cid[-2:-1] == '.':
+                                striplevels=cid[-1:]
+                                cid=cid[:-2]
+                            else:
+                                # add '.0' to the name
+                                try:
+                                    os.rename(path, path+'.'+striplevels)
+                                except exception as e:
+                                    logmsg(ip, '-', 'failed to rename: ' + str(e))
+                                    continue
+                            msg = queueorstamp(ip, 'Requeue', cid, striplevels, conf)
                             logmsg(ip, '-', 'Requeued ' + cid + ': ' + msg)
         else:
             if servicerunning:
@@ -675,8 +696,26 @@ def dispatch(environ, start_response):
         publock.release()
         if not os.path.exists(queuedir):
             os.mkdir(queuedir)
+        source = None
+        striplevels = '0'
+        if 'source' in parameters:
+            source = os.path.normpath(parameters['source'][0])
+            server = source.split('/')[0].split(':')[0]
+            allowedsources = ['github.com']
+            if 'allowsource' in conf:
+                allowedsources = conf['allowsource']
+            if server not in allowedsources:
+                return bad_request(start_response, ip, cn, 'source server ' + server + ' not allowed')
+            if 'striplevels' in parameters:
+                striplevels = os.path.normpath(parameters['striplevels'][0])
+            if striplevels not in ['0', '1', '2']:
+                return bad_request(start_response, ip, cn, 'only striplevels 0, 1, and 2 supported')
         ciddir = os.path.join(queuedir,os.path.dirname(cid))
         cidpath = os.path.join(queuedir,cid)
+        # Save the number of tar path levels to strip in the end of the
+        # cid path name.  The purpose of that is to figure out striplevels
+        # when requeueing after restart.
+        cidpath = cidpath + '.' + striplevels
         try:
             if not os.path.exists(ciddir):
                 os.mkdir(ciddir)
@@ -686,18 +725,34 @@ def dispatch(environ, start_response):
                     if bufsize > length:
                         bufsize = length
                     buf = input.read(bufsize)
-                    output.write(buf)
+                    if source is None:
+                        output.write(buf)
                     length -= len(buf)
+                if source is not None:
+                    url = 'https://' + source
+                    logmsg(ip, cn, 'downloading from ' + url)
+                    with urllib.request.urlopen(url) as response:
+                        shutil.copyfileobj(response, output)
+                    output.flush()
+                    if contentlength != '0':
+                        logmsg(ip, cn, 'ignored ' + contentlength + ' POSTed bytes')
+                    contentlength = str(os.path.getsize(cidpath + '.tmp'))
             os.rename(cidpath + '.tmp', cidpath)
             logmsg(ip, cn, 'wrote ' + contentlength + ' bytes to ' + cidpath)
         except Exception as e:
             logmsg(ip, cn, 'error getting publish data: ' + str(e))
+            logmsg(ip, cn, 'removing ' + cidpath)
             try:
                 os.remove(cidpath + '.tmp')
             except OSError:
                 pass
+            logmsg(ip, cn, 'removing cid from publishes in progress')
+            publock.acquire()
+            if cid in pubcids:
+                del pubcids[cid]
+            publock.release()
             return bad_request(start_response, ip, cn, 'error getting publish data')
-        return good_request(start_response, queueorstamp(ip, cn, cid, conf))
+        return good_request(start_response, queueorstamp(ip, cn, cid, striplevels, conf))
 
     logmsg(ip, cn, 'Unrecognized api ' + pathinfo)
     return error_request(start_response, '404 Not found', 'Unrecognized api')
